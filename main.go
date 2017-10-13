@@ -4,55 +4,96 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"flag"
+	"github.com/gin-gonic/gin"
 	"net/http"
 	"os"
+	"io/ioutil"
 )
 
 type Config struct {
-	Key string
+	Key string `json:"key"`
 }
 
 type MailData struct {
-	From    string `json:"from"`
-	To      string `json:"to"`
-	Subject string `json:"subject"`
-	Content string `json:"content"`
+	From    string `json:"from" binding:"required"`
+	To      string `json:"to" binding:"required"`
+	Subject string `json:"subject" binding:"required"`
+	Content string `json:"content" binding:"required"`
 }
 
+var (
+	port_opt = flag.Int("p", 8080, "Run Application Port")
+)
+
 func main() {
-	key := getConfig().Key
-	fmt.Printf("api key: %s\n", key)
+	config := getConfig()
+	fmt.Printf("api key: %s\n", config.Key)
 
-	http.HandleFunc("/api/sendmail", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case "POST":
-			w.Header().Add("Content-Type", "application/json")
+	flag.Parse()
 
-			var mailData MailData
-			{
-				body, _ := ioutil.ReadAll(r.Body)
-				json.Unmarshal(body, &mailData)
+	r := gin.Default()
+
+	api := r.Group("/api")
+	{
+		api.POST("/sendmail", sendMail)
+	}
+
+	r.Run(fmt.Sprintf(":%d", *port_opt))
+}
+
+func sendMail(c *gin.Context) {
+	var mailData MailData
+	if c.BindJSON(&mailData) == nil {
+		resp, e := sendRequest(
+			"POST",
+			"https://api.sendgrid.com/v3/mail/send",
+			createMailRequest(mailData),
+		)
+		if e != nil {
+			fmt.Printf("%s\n", e)
+			c.Status(500)
+		} else {
+			if (string(resp) != "") {
+				fmt.Printf("%s\n", string(resp))
+				c.Status(400)
+			} else {
+				c.JSON(200, gin.H{
+					"Success": true,
+				})
 			}
-
-			req, _ := http.NewRequest(
-				"POST",
-				"https://api.sendgrid.com/v3/mail/send",
-				bytes.NewBuffer(createMailRequest(mailData)),
-			)
-			req.Header.Add("Content-Type", "application/json")
-			req.Header.Add("Authorization", "Bearer " + key)
-
-			client := &http.Client{}
-			resp, _ := client.Do(req)
-			defer resp.Body.Close()
-			body, _ := ioutil.ReadAll(resp.Body)
-
-			w.Write([]byte(body))
-		default:
 		}
-	})
-	http.ListenAndServe(":8080", nil)
+	}
+}
+
+func sendRequest(method string, url string, body []byte) ([]byte, error) {
+	key := getConfig().Key
+
+	req, e := http.NewRequest(
+		method,
+		url,
+		bytes.NewBuffer(body),
+	)
+	if e != nil {
+		return nil, e
+	}
+
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Authorization", "Bearer " + key)
+
+	client := &http.Client{}
+	resp, e := client.Do(req)
+	defer resp.Body.Close()
+	if e != nil {
+		return nil, e
+	}
+
+	resp_body, e := ioutil.ReadAll(resp.Body)
+	if e != nil {
+		return nil, e
+	}
+
+	return resp_body, nil
 }
 
 func createMailRequest(data MailData) []byte {
